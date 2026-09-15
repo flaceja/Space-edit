@@ -10,6 +10,6 @@ TEXLIST=$(mktemp); printf '%s\n%s\n' "$ROOT/assets/text0.raw" "$ROOT/assets/text
  | ffmpeg -hide_banner -loglevel error -y \
      -f rawvideo -pixel_format rgb24 -video_size "${W}x${H}" -framerate 30 -i - \
      -c:v libx264 -preset slow -crf 23 -pix_fmt yuv420p -profile:v high -level 4.2 \
-     -x264-params "keyint=60:min-keyint=60:scenecut=0:open-gop=0" \
+     -x264-params "keyint=60:min-keyint=12:scenecut=40:open-gop=0" \
      -an "$OUT"
 rm -f "$TEXLIST"

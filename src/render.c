@@ -102,6 +102,7 @@ enum { P_TIME, P_MODE, P_CX, P_CY, P_CZ, P_TX, P_TY, P_TZ, P_ROLL, P_FOV,
        P_JET, P_NEB, P_STAR, P_TWK, P_BLOOM, P_GRAIN, P_VIGN, P_WARP,
        P_TUNNEL, P_HUE, P_SAT, P_TEXT, P_TALPHA, P_TSCALE, P_TOFF, P_FADE,
        P_SEED, P_INVERT, P_CONTRAST, P_DISKTEMP, P_STARDENS, P_RINGS,
+       P_GLITCH, P_MIRROR, P_SPIN, P_SHUTTER,
        NPARAM };
 
 typedef struct { float p[NPARAM]; } Frame;
@@ -583,27 +584,51 @@ int main(int argc, char **argv){
         /* ---- radial zoom blur + chromatic aberration + zoom ---- */
         float zoom = P[P_ZOOM] > 0.01f ? P[P_ZOOM] : 1.f;
         float rb = P[P_RBLUR], ca = P[P_CHROMA];
-        int taps = rb > 0.002f ? 9 : 1;
+        float spin = P[P_SPIN];                 /* rotational smear - whip cuts */
+        float glitch = P[P_GLITCH];             /* horizontal slice tear        */
+        float mirror = P[P_MIRROR];             /* 1 = mirror x, 2 = quad       */
+        int taps = (rb > 0.002f || fabsf(spin) > 0.002f) ? 9 : 1;
         float cxp = W*0.5f, cyp = H*0.5f;
+        unsigned int gseed = (unsigned)(fi*2246822519u);
         #pragma omp parallel for schedule(static)
-        for(int y=0;y<H;y++) for(int x=0;x<W;x++){
-            float dx = (x-cxp), dy = (y-cyp);
-            float acc[3]={0,0,0};
-            for(int ch=0; ch<3; ch++){
-                float cscale = 1.f + ca*((ch==0)?1.f:(ch==2)?-1.f:0.f);
-                float sum=0, wsum=0;
-                for(int tp=0; tp<taps; tp++){
-                    float f = taps>1 ? (float)tp/(taps-1) : 0.f;
-                    float sc = (1.f/zoom) * cscale * (1.f - rb*0.055f*f);
-                    float sxp = cxp + dx*sc, syp = cyp + dy*sc;
-                    float w = 1.f - 0.55f*f;
-                    V3 v = fetch(buf,W,H,sxp,syp);
-                    sum += ((ch==0)?v.x:(ch==1)?v.y:v.z)*w; wsum += w;
+        for(int y=0;y<H;y++){
+            /* slice tear: whole bands of rows jump sideways for a frame */
+            float tear = 0.f, tearc = 0.f;
+            if(glitch > 0.001f){
+                int band = (int)(y/(float)H*24.f);
+                float r1 = h2i(band, 0, (int)(gseed & 0xffff));
+                if(r1 < 0.55f){
+                    tear = (h2i(band,1,(int)(gseed&0xffff))-0.5f)*glitch*W*0.35f;
+                    tearc = (h2i(band,2,(int)(gseed&0xffff))-0.5f)*glitch*22.f;
                 }
-                acc[ch] = sum/wsum;
             }
-            size_t o=((size_t)y*W+x)*3;
-            post[o]=acc[0]; post[o+1]=acc[1]; post[o+2]=acc[2];
+            for(int x=0;x<W;x++){
+                float dx = (x-cxp), dy = (y-cyp);
+                if(mirror > 0.5f){
+                    dx = fabsf(dx);
+                    if(mirror > 1.5f) dy = fabsf(dy);
+                }
+                float acc[3]={0,0,0};
+                for(int ch=0; ch<3; ch++){
+                    float cscale = 1.f + ca*((ch==0)?1.f:(ch==2)?-1.f:0.f);
+                    float chshift = tear + tearc*((ch==0)?1.f:(ch==2)?-1.f:0.f);
+                    float sum=0, wsum=0;
+                    for(int tp=0; tp<taps; tp++){
+                        float f = taps>1 ? (float)tp/(taps-1) : 0.f;
+                        float sc = (1.f/zoom) * cscale * (1.f - rb*0.055f*f);
+                        float a = spin*f;
+                        float ca_ = cosf(a), sa_ = sinf(a);
+                        float rx = dx*ca_ - dy*sa_, ry = dx*sa_ + dy*ca_;
+                        float sxp = cxp + rx*sc + chshift, syp = cyp + ry*sc;
+                        float w = 1.f - 0.55f*f;
+                        V3 v = fetch(buf,W,H,sxp,syp);
+                        sum += ((ch==0)?v.x:(ch==1)?v.y:v.z)*w; wsum += w;
+                    }
+                    acc[ch] = sum/wsum;
+                }
+                size_t o=((size_t)y*W+x)*3;
+                post[o]=acc[0]; post[o+1]=acc[1]; post[o+2]=acc[2];
+            }
         }
 
         /* ---- grade, vignette, grain, text, fade ---- */

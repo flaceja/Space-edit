@@ -18,7 +18,7 @@ echo "rendering $N frames at ${W}x${H} -> $OUT"
      -i "$AUDIO" \
      -map 0:v:0 -map 1:a:0 \
      -c:v libx264 -preset slow -crf 23 -pix_fmt yuv420p -profile:v high -level 4.2 \
-     -x264-params "keyint=60:min-keyint=30:scenecut=0" \
+     -x264-params "keyint=60:min-keyint=12:scenecut=40" \
      -c:a aac -b:a 256k -ar 44100 \
      -movflags +faststart -shortest "$OUT"
 rm -f "$TEXLIST"
