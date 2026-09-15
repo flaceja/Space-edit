@@ -76,7 +76,7 @@ vignette, grain and the title overlays.
 | file | what |
 |------|------|
 | `out/space-edit.mp4` | the edit, 1080×1920, 30 fps, 86.3 s, H.264 CRF 29 + AAC 256k (79 MB, sized to fit in git) |
-| master | same render at CRF 23 (164 MB) — not committed, rebuild with `tools/render_video.sh` |
+| `out/master-parts/*.bin` | the CRF 23 master (164 MB, 15.2 Mbit/s), split in two because GitHub rejects files over 100 MB — join per `out/master-parts/README.md`, md5 `b38c4cc1eeee846ca0a0929d38220b4e` |
 
 Sync check on the encoded file: the 16 largest frame-to-frame brightness jumps all
 land 0.7–32.5 ms after a beat of the grid (one frame is 33 ms, so that is the
