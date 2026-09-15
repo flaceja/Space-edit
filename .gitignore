@@ -5,3 +5,4 @@ src/render
 assets/*.raw
 out/chunks/
 out/space-edit-master.mp4
+out/space-edit-preview.mp4
