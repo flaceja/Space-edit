@@ -102,7 +102,7 @@ enum { P_TIME, P_MODE, P_CX, P_CY, P_CZ, P_TX, P_TY, P_TZ, P_ROLL, P_FOV,
        P_JET, P_NEB, P_STAR, P_TWK, P_BLOOM, P_GRAIN, P_VIGN, P_WARP,
        P_TUNNEL, P_HUE, P_SAT, P_TEXT, P_TALPHA, P_TSCALE, P_TOFF, P_FADE,
        P_SEED, P_INVERT, P_CONTRAST, P_DISKTEMP, P_STARDENS, P_RINGS,
-       P_GLITCH, P_MIRROR, P_SPIN, P_SHUTTER,
+       P_GLITCH, P_MIRROR, P_SPIN, P_SHUTTER, P_LIGHTAZ, P_LIGHTEL,
        NPARAM };
 
 typedef struct { float p[NPARAM]; } Frame;
@@ -404,6 +404,241 @@ static V3 trace_tunnel(float sx, float sy, const float *P){
 }
 
 /* ------------------------------------------------------------------ */
+/* other subjects: a ringed gas giant, a star, a nebula fly-through.
+   The edit needs to cut between different things, not only between
+   angles on the same thing.                                          */
+
+static int sphere_hit(V3 ro, V3 rd, float R, float *tout){
+    float b = dot(ro,rd), c = dot(ro,ro) - R*R;
+    float h = b*b - c;
+    if(h < 0.f) return 0;
+    h = sqrtf(h);
+    float t = -b - h;
+    if(t < 0.f) t = -b + h;
+    if(t < 0.f) return 0;
+    *tout = t; return 1;
+}
+
+/* density of the ring system at cylindrical radius r */
+static float ring_density(float r, float rin, float rout, int seed){
+    if(r < rin || r > rout) return 0.f;
+    float u = (r - rin)/(rout - rin);
+    float n  = vnoise2(u*26.f, 0.5f, seed);
+    float n2 = vnoise2(u*74.f, 3.5f, seed+9);
+    float d = 0.45f + 0.75f*n - 0.35f*n2;
+    /* Cassini-style gaps */
+    d *= 1.f - 0.92f*expf(-powf((u-0.42f)/0.035f, 2.f));
+    d *= 1.f - 0.75f*expf(-powf((u-0.70f)/0.028f, 2.f));
+    d *= smoothstepf(0.f,0.06f,u)*(1.f - smoothstepf(0.88f,1.f,u));
+    return clampf(d, 0.f, 1.f);
+}
+
+static V3 planet_surface(V3 n, float t, int seed, float *rough){
+    /* bands: noise stretched hard in latitude, drifting in longitude */
+    V3 q = v3(n.x*0.75f, n.y*7.5f, n.z*0.75f);
+    float drift = t*0.035f;
+    float w = fbm3(v3(n.x*1.7f + drift, n.y*2.2f, n.z*1.7f), 3, seed+5);
+    float band = fbm3(add(q, v3(w*1.6f, 0.f, w*1.6f)), 4, seed);
+    float fine = fbm3(v3(n.x*3.2f + drift*2.f, n.y*22.f, n.z*3.2f), 3, seed+31);
+    float v = clampf(band*0.78f + fine*0.32f, 0.f, 1.f);
+    /* one storm */
+    V3 sc = norm(v3(0.55f, -0.34f, 0.76f));
+    float sd = 1.f - clampf(dot(n, sc), 0.f, 1.f);
+    float storm = expf(-sd*44.f);
+    int pal = seed % 3;
+    V3 a, b, c;
+    if(pal == 0){ a=v3(0.26f,0.11f,0.06f); b=v3(0.74f,0.46f,0.24f); c=v3(0.92f,0.82f,0.68f); }
+    else if(pal == 1){ a=v3(0.05f,0.11f,0.22f); b=v3(0.22f,0.44f,0.64f); c=v3(0.74f,0.85f,0.95f); }
+    else { a=v3(0.18f,0.08f,0.20f); b=v3(0.52f,0.28f,0.54f); c=v3(0.84f,0.74f,0.84f); }
+    V3 col = v < 0.5f ? mixv(a, b, v*2.f) : mixv(b, c, (v-0.5f)*2.f);
+    col = mixv(col, v3(0.95f,0.72f,0.55f), storm*0.85f);
+    *rough = v;
+    return col;
+}
+
+static V3 trace_planet(V3 ro, V3 rd, const float *P, float pixAng){
+    float t = P[P_TIME];
+    int seed = (int)P[P_SEED] + 77;
+    const float R = 1.0f;
+    int has_rings = ((seed/3) % 5) != 0;
+    float rin = 1.34f + 0.16f*h1((unsigned)seed*2654435761u);
+    float rout = rin + 0.85f + 0.55f*h1((unsigned)(seed*40503u+7u));
+    if(!has_rings){ rin = 99.f; rout = 99.f; }
+    float laz = P[P_LIGHTAZ]*(float)M_PI/180.f, lel = P[P_LIGHTEL]*(float)M_PI/180.f;
+    V3 L = norm(v3(cosf(lel)*sinf(laz), sinf(lel), -cosf(lel)*cosf(laz)));
+    float ts, tr;
+    int hs = sphere_hit(ro, rd, R, &ts);
+    int hr = 0;
+    /* rings live in the planet's equatorial plane, y = 0 */
+    if(fabsf(rd.y) > 1e-5f){
+        tr = -ro.y/rd.y;
+        if(tr > 0.f){
+            V3 pr = add(ro, mul(rd, tr));
+            float rr = sqrtf(pr.x*pr.x + pr.z*pr.z);
+            if(rr > rin && rr < rout) hr = 1;
+        }
+    }
+    V3 bg = add(stars(rd, pixAng, t, P[P_TWK], P[P_STAR], P[P_STARDENS]),
+                nebula(rd, t, P[P_NEB], (int)P[P_SEED]));
+    V3 col = bg;
+
+    /* --- planet body ------------------------------------------------- */
+    if(hs){
+        V3 p = add(ro, mul(rd, ts));
+        V3 n = norm(p);
+        float rough;
+        V3 sc = planet_surface(n, t, seed, &rough);
+        float ndl = dot(n, L);
+        float lit = smoothstepf(-0.06f, 0.42f, ndl);
+        lit *= 0.35f + 0.65f*powf(clampf(ndl,0.f,1.f), 0.75f);   /* falloff zum Terminator */
+        /* the rings drop a shadow on the planet */
+        if(fabsf(L.y) > 1e-4f){
+            float th = -p.y/L.y;
+            if(th > 0.f){
+                V3 ph = add(p, mul(L, th));
+                float rr = sqrtf(ph.x*ph.x + ph.z*ph.z);
+                lit *= 1.f - 0.78f*ring_density(rr, rin, rout, seed);
+            }
+        }
+        float amb = 0.028f;
+        V3 body = mul(sc, lit*1.15f + amb);
+        /* limb haze */
+        float fres = powf(1.f - clampf(dot(n, mul(rd,-1.f)), 0.f, 1.f), 3.2f);
+        V3 atmo = mixv(v3(0.35f,0.55f,1.05f), v3(1.05f,0.72f,0.45f), 0.35f);
+        body = add(body, mul(atmo, fres*(0.20f + 0.80f*lit)*1.05f));
+        col = body;
+    } else {
+        /* atmosphere glow for rays that graze the limb */
+        float b = -dot(ro, rd);
+        V3 cp = add(ro, mul(rd, fmaxf(b, 0.f)));
+        float d = len(cp);
+        if(d > R && b > 0.f){
+            float g = expf(-(d - R)*13.f);
+            float side = clampf(dot(norm(cp), L)*0.5f + 0.5f, 0.f, 1.f);
+            col = add(col, mul(v3(0.42f,0.62f,1.10f), g*0.55f*(0.25f + 0.75f*side)));
+        }
+    }
+
+    /* --- rings, composited in front of or behind the planet ---------- */
+    if(hr && (!hs || tr < ts)){
+        V3 pr = add(ro, mul(rd, tr));
+        float rr = sqrtf(pr.x*pr.x + pr.z*pr.z);
+        float dens = ring_density(rr, rin, rout, seed);
+        if(dens > 0.002f){
+            float u = (rr - rin)/(rout - rin);
+            V3 rc = mixv(v3(0.78f,0.68f,0.55f), v3(0.95f,0.90f,0.86f), u);
+            rc = mixv(rc, v3(0.60f,0.52f,0.62f), 0.35f*vnoise2(u*40.f, 1.5f, seed+3));
+            /* planet shadow on the rings */
+            float shadow = 1.f;
+            float tb;
+            if(sphere_hit(pr, L, R, &tb)) shadow = 0.13f;
+            /* grazing view thickens the ring */
+            float thick = clampf(0.30f/fmaxf(fabsf(rd.y), 0.05f), 0.4f, 2.6f);
+            float a = clampf(dens*thick*0.95f, 0.f, 1.f);
+            float rlit = 0.25f + 0.75f*clampf(fabsf(L.y)*2.2f, 0.f, 1.f);
+            V3 em = mul(rc, shadow*rlit*(1.05f + 0.35f*thick));
+            col = add(mul(col, 1.f - a), mul(em, a));
+        }
+    }
+    return col;
+}
+
+static V3 core_rim(int seed){
+    switch(seed % 4){
+        case 0: return v3(1.5f,0.85f,0.45f);
+        case 1: return v3(0.75f,1.05f,1.70f);
+        case 2: return v3(1.5f,0.55f,0.25f);
+        default:return v3(1.4f,0.95f,1.10f);
+    }
+}
+static V3 trace_star(V3 ro, V3 rd, const float *P, float pixAng){
+    float t = P[P_TIME];
+    int seed = (int)P[P_SEED] + 211;
+    const float R = 1.0f;
+    float ts;
+    V3 col = mul(stars(rd, pixAng, t, P[P_TWK], P[P_STAR]*0.5f, P[P_STARDENS]), 1.f);
+    col = add(col, mul(nebula(rd, t, P[P_NEB]*0.5f, (int)P[P_SEED]), 0.6f));
+    float b = -dot(ro, rd);
+    V3 cp = add(ro, mul(rd, fmaxf(b, 0.f)));
+    float d = fmaxf(len(cp), R*1.001f);
+    if(sphere_hit(ro, rd, R, &ts)){
+        V3 p = add(ro, mul(rd, ts));
+        V3 n = norm(p);
+        float gran = fbm3(add(mul(n, 16.f), v3(0.f, t*0.22f, 0.f)), 4, seed);
+        float fine = fbm3(add(mul(n, 46.f), v3(t*0.14f, 0.f, 0.f)), 3, seed+7);
+        float v = clampf((gran*0.68f + fine*0.42f - 0.34f)*1.55f, 0.f, 1.f);
+        float mu = clampf(dot(n, mul(rd,-1.f)), 0.f, 1.f);
+        float limb = 0.32f + 0.68f*powf(mu, 0.55f);        /* limb darkening */
+        V3 edge, core;
+        switch(seed % 4){                                  /* spectral class */
+            case 0: edge=v3(1.40f,0.78f,0.26f); core=v3(1.75f,1.58f,1.10f); break; /* G, gold */
+            case 1: edge=v3(0.55f,0.85f,1.55f); core=v3(1.25f,1.55f,1.85f); break; /* B, blue */
+            case 2: edge=v3(1.35f,0.34f,0.14f); core=v3(1.60f,0.85f,0.42f); break; /* K, orange */
+            default:edge=v3(1.20f,0.62f,0.72f); core=v3(1.70f,1.45f,1.55f); break; /* pink-white */
+        }
+        V3 s = mixv(edge, core, powf(v, 1.15f));
+        float spot = smoothstepf(0.06f, 0.005f, v);         /* rare, small */
+        s = mul(s, 1.f - 0.30f*spot);
+        col = mul(s, limb*(0.72f + 0.34f*v)*P[P_DISK]*0.78f);
+        /* chromosphere at the very edge */
+        col = add(col, mul(v3(1.3f,0.35f,0.22f), powf(1.f-mu, 5.f)*0.5f*P[P_DISK]));
+    } else if(b > 0.f){
+        float x = d/R;
+        float corona = powf(1.f/x, 2.3f);
+        V3 nd = norm(cp);
+        float str = fbm3(add(mul(nd, 6.5f), v3(0.f, 0.f, t*0.12f)), 3, seed+19);
+        float ray = powf(clampf(str*1.7f-0.42f,0.f,1.f), 1.3f);
+        corona *= 0.30f + 1.55f*ray;
+        V3 ca_, cb_;
+        switch(seed % 4){
+            case 0: ca_=v3(1.45f,0.72f,0.30f); cb_=v3(0.95f,0.42f,0.75f); break;
+            case 1: ca_=v3(0.60f,0.95f,1.60f); cb_=v3(0.55f,0.55f,1.15f); break;
+            case 2: ca_=v3(1.40f,0.45f,0.18f); cb_=v3(0.95f,0.30f,0.42f); break;
+            default:ca_=v3(1.30f,0.70f,0.85f); cb_=v3(0.80f,0.55f,1.05f); break;
+        }
+        V3 cc = mixv(ca_, cb_, clampf((x-1.f)*0.45f,0.f,1.f));
+        col = add(col, mul(cc, corona*0.95f*P[P_DISK]));
+        /* thin bright rim right at the limb */
+        col = add(col, mul(core_rim(seed), expf(-(x-1.f)*46.f)*0.9f*P[P_DISK]));
+    }
+    return col;
+}
+
+static V3 trace_nebula_fly(V3 ro, V3 rd, const float *P, float pixAng){
+    float t = P[P_TIME];
+    int seed = (int)P[P_SEED] + 401;
+    V3 acc = v3(0,0,0);
+    float trans = 1.f;
+    const int STEPS = 44;
+    const float dt = 0.55f;
+    float jitter = h1((unsigned)((int)(rd.x*9871.f) ^ (int)(rd.y*1237.f)))*dt;
+    for(int i=0;i<STEPS;i++){
+        float s = 0.6f + i*dt + jitter;
+        V3 p = add(ro, mul(rd, s));
+        float d = fbm3(mul(p, 0.30f), 4, seed);
+        float m = fbm3(mul(p, 0.10f), 3, seed+61);
+        float fil = 1.f - fabsf(2.f*vnoise3(p.x*0.85f, p.y*0.85f, p.z*0.85f, seed+13) - 1.f);
+        float dens = powf(clampf((d-0.545f)*3.4f,0.f,1.f), 2.0f)
+                   * powf(clampf((m-0.44f)*2.8f,0.f,1.f), 1.3f)
+                   * (0.25f + 1.25f*powf(clampf((fil-0.45f)*2.2f,0.f,1.f), 1.5f));
+        if(dens > 0.002f){
+            float hot = powf(clampf((d-0.60f)*3.2f,0.f,1.f), 2.f);
+            V3 c1 = v3(0.08f,0.24f,0.72f), c2 = v3(0.14f,0.52f,0.62f), c3 = v3(1.15f,0.55f,0.62f);
+            float tint = fbm3(mul(p, 0.055f), 2, seed+91);
+            V3 c = mixv(c1, c2, clampf(tint*2.2f-0.55f,0.f,1.f));
+            c = mixv(c, c3, hot*0.85f);
+            float e = dens*dt*0.85f;
+            acc = add(acc, mul(c, e*trans*1.45f));
+            trans *= expf(-dens*dt*2.6f);
+            if(trans < 0.02f) break;
+        }
+    }
+    V3 bg = add(stars(rd, pixAng, t, P[P_TWK], P[P_STAR], P[P_STARDENS]),
+                nebula(rd, t, P[P_NEB]*0.45f, (int)P[P_SEED]));
+    return add(acc, mul(bg, trans));
+}
+
+/* ------------------------------------------------------------------ */
 /* colour pipeline                                                     */
 static V3 aces(V3 x){
     V3 r;
@@ -521,8 +756,13 @@ int main(int argc, char **argv){
                     col = trace_tunnel(rsx*1.05f, rsy*1.05f, P);
                 } else {
                     V3 rd = norm(add(add(mul(rt2, sx*tanH), mul(up2, sy*tanH)), fw));
-                    col = (mode==1) ? trace_warp(rd, sx, sy, P, pixAng)
-                                    : trace_bh(ro, rd, P, pixAng);
+                    switch(mode){
+                        case 1:  col = trace_warp(rd, sx, sy, P, pixAng); break;
+                        case 3:  col = trace_planet(ro, rd, P, pixAng); break;
+                        case 4:  col = trace_star(ro, rd, P, pixAng); break;
+                        case 5:  col = trace_nebula_fly(ro, rd, P, pixAng); break;
+                        default: col = trace_bh(ro, rd, P, pixAng); break;
+                    }
                 }
                 size_t o = ((size_t)y*W+x)*3;
                 buf[o+0]=col.x; buf[o+1]=col.y; buf[o+2]=col.z;
